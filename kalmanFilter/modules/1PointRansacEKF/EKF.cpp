@@ -125,22 +125,6 @@ EKF::EKF(const char *configurationFileName, const char *outputPath) : _ekfSteps(
 {
     ConfigurationManager &configManager = ConfigurationManager::getInstance();
     configManager.loadConfigurationFromFile(configurationFileName);
-
-    if (!_strOutputPath.empty())
-    {
-        std::string outputFileName(_strOutputPath + "output.yml");
-
-        _outputFileStorage.open(outputFileName, cv::FileStorage::WRITE);
-
-        std::string logFileName(_strOutputPath + "log.txt");
-        _logFile.open(logFileName.c_str(), std::ios_base::out);
-
-#ifndef ANDROID
-        // Se genera el video en el cual se va a guardar la secuencia de predicciones
-        cv::Size size(configManager.cameraCalibration->pixelsX, configManager.cameraCalibration->pixelsY);
-        _outputVideoWriter.open(_strOutputPath + "videoOutput.mpg", CV_FOURCC('P','I','M','1'), 20, size, true);
-#endif
-    }
 }
 
 //-------------------------------------------------------------------------------------------------------------
@@ -169,16 +153,6 @@ EKF::~EKF()
 
 void EKF::init(const cv::Mat &image)
 {
-    if (_logFile.is_open())
-    {
-        time_t seed = time(NULL);
-        srand(static_cast<uint>(seed));
-
-        _logFile << "Random Seed: " << seed << std::endl << std::endl;
-
-        _logFile << "~~~~~~~~~~~~ STEP " << _ekfSteps << " ~~~~~~~~~~~~" << std::endl;
-    }
-
     ExtendedKalmanFilterParameters *ekfParams = ConfigurationManager::getInstance().ekfParams;
 
     initState(state);
@@ -195,32 +169,6 @@ void EKF::init(const cv::Mat &image)
     VectorImageFeatureMeasurement newFeatureMeasurements;
     detectNewImageFeatures(image, noPredictions, ekfParams->minMatchesPerImage, newFeatureMeasurements);
 
-#ifdef DEBUG_SHOW_IMAGES
-    cv::Mat imageWithKeypoints;
-    image.copyTo(imageWithKeypoints);
-
-    for (uint i = 0; i < newFeatureMeasurements.size(); ++i)
-    {
-        drawPoint(imageWithKeypoints, newFeatureMeasurements[i]->imagePos, cv::Scalar(0, 0, 255));
-    }
-
-    std::cout << std::endl;
-
-    std::string windowName = "Features detectados en la primer imagen (";
-
-    std::stringstream convert;
-    convert << newFeatureMeasurements.size();
-
-    windowName += convert.str();
-    windowName += ")";
-
-    cv::namedWindow(windowName);
-    cv::imshow(windowName, imageWithKeypoints);
-    cv::waitKey(0);
-
-    cv::destroyWindow(windowName);
-#endif
-
     // Agregar los features nuevos al estado
     addFeaturesToStateAndCovariance(newFeatureMeasurements, state, stateCovarianceMatrix);
 
@@ -228,11 +176,6 @@ void EKF::init(const cv::Mat &image)
     for (uint i = 0; i < newFeatureMeasurementsSize; ++i)
     {
         delete newFeatureMeasurements[i];
-    }
-
-    if (_logFile.is_open())
-    {
-        state.showDetailed(_logFile);
     }
 }
 
@@ -243,29 +186,10 @@ void EKF::step(const cv::Mat &image)
 {
     _ekfSteps++;
 
-    if (_logFile.is_open())
-    {
-        _logFile << std::endl << std::endl;
-        _logFile << "~~~~~~~~~~~~ STEP " << _ekfSteps << " ~~~~~~~~~~~~" << std::endl;
-    }
-
     //-------------------------------------------------------------------------------------------------------------
     // Prediccion
 
     Timer timer;
-
-    if (!_strOutputPath.empty())
-    {
-        std::stringstream frameName;
-        frameName << "Frame " << _ekfSteps;
-
-        _outputFileStorage << frameName.str() << "{";
-
-        cvWriteComment(_outputFileStorage.fs, "", 0);
-        cvWriteComment(_outputFileStorage.fs, "Running time (microseconds)", 0);
-        cvWriteComment(_outputFileStorage.fs, "", 0);
-        timer.start();
-    }
 
     VectorImageFeaturePrediction predictedDistortedFeatures;
     VectorMatd predictedFeatureJacobians;
@@ -282,79 +206,14 @@ void EKF::step(const cv::Mat &image)
                                predictedDistortedFeatures,
                                predictedFeatureJacobians,
                                unseenFeatures );
-
-    if (!_strOutputPath.empty())
-    {
-        double predictionTime = timer.getElapsedTimeInMicroSec();
-        timer.stop();
-
-        _outputFileStorage << "Prediction" << predictionTime;
-    }
-
-    if (!_strOutputPath.empty())
-    {
-        cv::Mat predictionImage;
-        drawPrediction(image, predictedDistortedFeatures, state.mapFeatures, predictionImage);
-
-        std::stringstream imageFileName;
-        imageFileName << _strOutputPath << std::setfill('0') << std::setw(5) << _ekfSteps << ".png";
-        cv::imwrite(imageFileName.str().c_str(), predictionImage);
-
-#ifndef ANDROID
-        _outputVideoWriter.write(predictionImage);
-#endif
-
-#ifndef DEBUG_SHOW_IMAGES
-    }
-#else
-        // Mostramos la imagen
-        cv::namedWindow("Predicciones");
-        cv::imshow("Predicciones", predictionImage);
-        cv::waitKey(1);
-    }
-    else
-    {
-        cv::Mat predictionImage;
-        drawPrediction(image, predictedDistortedFeatures, state.mapFeatures, predictionImage);
-
-        // Mostramos la imagen
-        cv::namedWindow("Predicciones");
-        cv::imshow("Predicciones", predictionImage);
-        cv::waitKey(1);
-    }
-#endif
-
     //-------------------------------------------------------------------------------------------------------------
     // Medicion y Matching
-
-    if (!_strOutputPath.empty())
-    {
-        timer.start();
-    }
-
     VectorFeatureMatch matches;
 
     matchPredictedFeatures(image, state.mapFeatures, predictedDistortedFeatures, matches);
 
-    if (!_strOutputPath.empty())
-    {
-        double matchingTime = timer.getElapsedTimeInMicroSec();
-        timer.stop();
-
-        _outputFileStorage << "Matching" << matchingTime;
-    }
-
-//#ifdef DEBUG_SHOW_IMAGES
-//    showMatches(image, state.mapFeatures, matches, "Matches iniciales");
-//#endif
-
     //-------------------------------------------------------------------------------------------------------------
     // Update con Low Innovation
-
-    if (!_strOutputPath.empty())
-    {
-        timer.start();
-    }
 
     VectorImageFeaturePrediction predictedMatchedFeatures;
     VectorMatd predictedMatchedJacobians;
@@ -402,48 +261,11 @@ void EKF::step(const cv::Mat &image)
     ransac(state, stateCovarianceMatrix, predictedMatchedFeatures, predictedMatchedJacobians, matches,
            inlierMatches, inlierPredictions, inlierJacobians, outlierMatches);
 
-    if (!_strOutputPath.empty())
-    {
-        double ransacTime = timer.getElapsedTimeInMicroSec();
-        timer.stop();
-
-        _outputFileStorage << "Ransac" << ransacTime;
-
-        int totalMatches = matches.size();
-        _outputFileStorage << "totalMatches" << totalMatches;
-
-        int liInliers = inlierMatches.size();
-        _outputFileStorage << "liInliers" << liInliers;
-    }
-
-//#ifdef DEBUG_SHOW_IMAGES
-//    // inliers antes de hacer el rescate
-//    showMatches(image, state.mapFeatures, inlierMatches, "Matches ransac");
-//#endif
-
-    if (!_strOutputPath.empty())
-    {
-        timer.start();
-    }
-
     // Se actualiza el estado tratando de recuperar ouliers
     update(state, stateCovarianceMatrix, inlierMatches, inlierPredictions, inlierJacobians);
 
-    if (!_strOutputPath.empty())
-    {
-        double updateLiTime = timer.getElapsedTimeInMicroSec();
-        timer.stop();
-
-        _outputFileStorage << "UpdateLI" << updateLiTime;
-    }
-
     //-------------------------------------------------------------------------------------------------------------
     // Rescate de outliers
-
-    if (!_strOutputPath.empty())
-    {
-        timer.start();
-    }
 
     VectorFeatureMatch rescuedMatches;
     VectorImageFeaturePrediction rescuedPredictions;
@@ -504,25 +326,9 @@ void EKF::step(const cv::Mat &image)
         rescueOutliers( outlierMatches, outlierMatchFeaturePrediction, outlierMatchFeaturePredictionJacobians,
                         rescuedMatches, rescuedPredictions, rescuedJacobians );
     }
-
-    if (!_strOutputPath.empty())
-    {
-        double rescueTime = timer.getElapsedTimeInMicroSec();
-        timer.stop();
-
-        _outputFileStorage << "RescueOutliers" << rescueTime;
-
-        int hiInliers = rescuedMatches.size();
-        _outputFileStorage << "hiInliers" << hiInliers;
-    }
-
+  
     //-------------------------------------------------------------------------------------------------------------
     // Update con High Innovation
-
-    if (!_strOutputPath.empty())
-    {
-        timer.start();
-    }
 
     // Si se rescataron outliers entonces actualizar el ekf
     size_t rescuedMatchesSize = rescuedMatches.size();
@@ -530,18 +336,6 @@ void EKF::step(const cv::Mat &image)
     {
         update(state, stateCovarianceMatrix, rescuedMatches, rescuedPredictions, rescuedJacobians);
     }
-
-    if (!_strOutputPath.empty())
-    {
-        double updateHiTime = timer.getElapsedTimeInMicroSec();
-        timer.stop();
-
-        _outputFileStorage << "UpdateHI" << updateHiTime;
-    }
-
-#ifdef DEBUG_SHOW_RANSAC_INFO
-    showRescueOutliers(rescuedMatches, rescuedPredictions, "Matches y predicciones Rescatadas");
-#endif
 
     //-------------------------------------------------------------------------------------------------------------
     // Map management: se agregan y se eliminan features del mapa
@@ -553,20 +347,6 @@ void EKF::step(const cv::Mat &image)
     {
         inlierMatches.push_back(rescuedMatches[i]);
         inlierPredictions.push_back(rescuedPredictions[i]);
-    }
-
-#ifdef DEBUG
-    std::cout << "Cantidad de matches rescatados: " << rescuedMatches.size() << std::endl;
-#endif
-
-#if defined(DEBUG_SHOW_IMAGES)
-    // inliers junto con los ouliers rescatados
-    showMatches(image, state.mapFeatures, inlierMatches, "matches inliers y rescatados");
-#endif
-
-    if (!_strOutputPath.empty())
-    {
-        timer.start();
     }
 
     updateMapFeatures(predictedDistortedFeatures, inlierMatches, state);
@@ -584,11 +364,8 @@ void EKF::step(const cv::Mat &image)
              (ekfParams->maxMapSize > 0 && stateCovarianceMatrix.rows + newFeaturesNeededCount*6 > ekfParams->maxMapSize) ) )
         {
             removeFeaturesFromStateAndCovariance(unseenFeatures, state, stateCovarianceMatrix);
-//            resetEKFMap(state, stateCovarianceMatrix);
-//            newFeaturesNeededCount = ekfParams->minMatchesPerImage;
-#ifdef DEBUG
-            std::cout << "Se eliminaron del mapa los features que no se ven en el frame actual." << std::endl;
-#endif
+            //resetEKFMap(state, stateCovarianceMatrix);
+            //newFeaturesNeededCount = ekfParams->minMatchesPerImage;
         }
 
         convertMapFeaturesInverseDepthToDepth(state, stateCovarianceMatrix);
@@ -609,23 +386,6 @@ void EKF::step(const cv::Mat &image)
                 delete newFeatureMeasurements[i];
             }
         }
-    }
-
-    if (!_strOutputPath.empty())
-    {
-        double mapManagementTime = timer.getElapsedTimeInMicroSec();
-
-        _outputFileStorage << "MapManagement" << mapManagementTime;
-
-        // Guardamos el estado y la matriz de covarianza en el output
-        cvWriteComment(_outputFileStorage.fs, "", 0);
-        cvWriteComment(_outputFileStorage.fs, "State and Covariance Estimation", 0);
-        cvWriteComment(_outputFileStorage.fs, "", 0);
-
-        _outputFileStorage << "StateEstimation" << state;
-        _outputFileStorage << "StateCovarianceMatrixEstimation" << Matd( stateCovarianceMatrix(cv::Range(0, 13), cv::Range(0, 13)) );
-
-        _outputFileStorage << "}";
     }
 
     //-------------------------------------------------------------------------------------------------------------
@@ -657,10 +417,5 @@ void EKF::step(const cv::Mat &image)
     for (uint i = 0; i < outlierMatchFeaturePredictionJacobiansSize; ++i)
     {
         delete outlierMatchFeaturePredictionJacobians[i];
-    }
-
-    if (_logFile.is_open())
-    {
-        state.showDetailed(_logFile);
     }
 }
